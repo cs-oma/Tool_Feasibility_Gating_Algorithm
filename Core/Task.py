@@ -26,6 +26,10 @@ class Task:
     arrival_time  : float
     deadline      : float
 
+    # Multi-agent extension: identifies which upstream agent generated the task.
+    # Default keeps single-agent experiments backward compatible.
+    agent_id_i32   : int = 0
+
     high_priority_bool: bool = False
 
                              
