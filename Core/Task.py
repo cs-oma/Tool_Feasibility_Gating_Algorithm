@@ -30,6 +30,7 @@ class Task:
 
                              
     chosen_mode_mode_opt: Optional[Mode] = None
+    assigned_agent_id_i32_opt: Optional[int] = None
 
                         
     start_service_time_f64_opt : Optional[float] = None

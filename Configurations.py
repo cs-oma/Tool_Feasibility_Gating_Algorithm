@@ -101,7 +101,7 @@ class Policy_Config:
                                                                                                       
     tfg_slack_factor: float = 1.0                               
                                                                                                        
-    tfg_epsilon_f64: float = 0.0
+    tfg_epsilon_f64: float = 0.7
 
                                                                           
     tfg_adaptive_epsilon_enabled_bool: bool = False
@@ -117,7 +117,7 @@ class Policy_Config:
     tfg_wait_estimator: str = "mix"                           
 
                                               
-    tfg_queue_slow_mix_p: float = 0.55
+    tfg_queue_slow_mix_p: float = 0.0
 
                                                                             
     tfg_include_in_service: bool = True
@@ -139,6 +139,8 @@ class Simulation_Config:
     drop_expired_in_queue_bool    : bool  = True
     priority_task_rate_f64        : float = 0.0
     priority_first_enabled_bool   : bool  = False
+    num_agents_i32                : int   = 1
+    scale_arrival_with_agents_bool: bool  = True
 
     arrival_config : Arrival_Config = Arrival_Config(
         lambda_rate_f64=0.05,
@@ -163,9 +165,19 @@ class Simulation_Config:
     utility_config : Utility_Config = Utility_Config()
     policy_config   : Policy_Config  = Policy_Config()
 
+    def Effective_Arrival_Rate(self) -> float:
+        base_lambda_f64 = float(self.arrival_config.lambda_rate_f64)
+        if self.scale_arrival_with_agents_bool:
+            return float(base_lambda_f64 * float(self.num_agents_i32) * 1.2)
+        return float(base_lambda_f64)
+
     def __post_init__(self) -> None:
         if not (0.0 <= float(self.priority_task_rate_f64) <= 1.0):
             raise ValueError("priority_task_rate_f64 must be in [0, 1].")
+        if int(self.num_agents_i32) <= 0:
+            raise ValueError("num_agents_i32 must be > 0.")
+        if float(self.Effective_Arrival_Rate()) <= 0.0:
+            raise ValueError("effective arrival rate must be > 0.")
 
 
 """

@@ -3,7 +3,7 @@
 #  Product Signature: TFG
 # ------------------------------------------------------------------------------
 #  File: Core/Simulator.py
-#  Purpose: Run the single-server discrete-event simulation.
+#  Purpose: Run the multi-agent discrete-event simulation with a shared queue.
 #  Author: Muhammet Ali Ozturk
 #  Generated: 2026-01-18
 #  Environment: Python 3.9.13
@@ -11,7 +11,7 @@
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, List, Optional
+from typing import Deque, Dict, List, Optional
 
 import numpy as np
 
@@ -24,27 +24,28 @@ from Models.Policy_Base import Scheduling_Policy, System_State
 
 
 @dataclass
-class Server:
-    busy_bool                   : bool           = False
-    current_task_task_opt       : Optional[Task]  = None
-    current_service_end_f64_opt : Optional[float] = None
+class Agent:
+    agent_id_i32: int
+    busy_bool: bool = False
+    current_task_task_opt: Optional[Task] = None
+    current_service_end_f64_opt: Optional[float] = None
 
 
 class Simulator:
 
     def __init__(
         self,
-        cfg_simulation_config           : Simulation_Config,
-        interarrival_model_interarrival : Interarrival_Model,
-        service_model_service_time      : Service_Time_Model,
-        policy_scheduling_policy        : Scheduling_Policy,
-        metrics_metrics_collector       : MetricsCollector,
+        cfg_simulation_config: Simulation_Config,
+        interarrival_model_interarrival: Interarrival_Model,
+        service_model_service_time: Service_Time_Model,
+        policy_scheduling_policy: Scheduling_Policy,
+        metrics_metrics_collector: MetricsCollector,
     ) -> None:
-        self.cfg_simulation_config           = cfg_simulation_config
+        self.cfg_simulation_config = cfg_simulation_config
         self.interarrival_model_interarrival = interarrival_model_interarrival
-        self.service_model_service_time      = service_model_service_time
-        self.policy_scheduling_policy        = policy_scheduling_policy
-        self.metrics_metrics_collector       = metrics_metrics_collector
+        self.service_model_service_time = service_model_service_time
+        self.policy_scheduling_policy = policy_scheduling_policy
+        self.metrics_metrics_collector = metrics_metrics_collector
 
         self.policy_scheduling_policy.priority_first_enabled_bool = bool(
             cfg_simulation_config.priority_first_enabled_bool
@@ -54,13 +55,16 @@ class Simulator:
         self.calendar_event_calendar = Event_Calendar()
 
         self.queue_deque_task: Deque[Task] = deque()
-        self.server_server = Server()
+        self.agents_list_agent: List[Agent] = [
+            Agent(agent_id_i32=i) for i in range(int(cfg_simulation_config.num_agents_i32))
+        ]
+        self._agents_by_id_dict: Dict[int, Agent] = {
+            a.agent_id_i32: a for a in self.agents_list_agent
+        }
 
-        self.now_f64              : float = 0.0
-        self._next_task_id_i32    : int   = 0
-        self._arrivals_count_i32  : int   = 0
-
-        self._in_system_list_task: List[Task] = []
+        self.now_f64: float = 0.0
+        self._next_task_id_i32: int = 0
+        self._arrivals_count_i32: int = 0
 
     def _Make_Task(self, arrival_time_f64: float) -> Task:
         self._next_task_id_i32 += 1
@@ -85,17 +89,32 @@ class Simulator:
             high_priority_bool=is_high_priority,
         )
 
+    def _Busy_Agent_Count(self) -> int:
+        return sum(1 for ag in self.agents_list_agent if ag.busy_bool)
+
+    def _Any_Agent_Busy(self) -> bool:
+        return self._Busy_Agent_Count() > 0
+
+    def _Aggregate_In_Service_Remaining(self) -> float:
+        total_f64 = 0.0
+        for agent in self.agents_list_agent:
+            if agent.busy_bool and agent.current_task_task_opt is not None and agent.current_service_end_f64_opt is not None:
+                total_f64 += max(float(agent.current_service_end_f64_opt) - self.now_f64, 0.0)
+        return float(total_f64)
+
     def _State(self) -> System_State:
-        remaining = 0.0
-        if self.server_server.busy_bool and self.server_server.current_task_task_opt is not None:
-            remaining = max(self.server_server.current_service_end_f64_opt - self.now_f64, 0.0)
+        current_task_opt: Optional[Task] = None
+        for agent in self.agents_list_agent:
+            if agent.busy_bool and agent.current_task_task_opt is not None:
+                current_task_opt = agent.current_task_task_opt
+                break
 
         return System_State(
             now_f64=self.now_f64,
             queue_length_i32=len(self.queue_deque_task),
-            server_busy_bool=self.server_server.busy_bool,
-            current_task_task_opt=self.server_server.current_task_task_opt,
-            server_remaining_time=remaining
+            server_busy_bool=self._Any_Agent_Busy(),
+            current_task_task_opt=current_task_opt,
+            server_remaining_time=self._Aggregate_In_Service_Remaining(),
         )
 
     def Initialize(self) -> None:
@@ -127,9 +146,8 @@ class Simulator:
             if ev_event_opt.event_type == Event_Type.STOP:
                 break
 
-                        
             self.metrics_metrics_collector.Record_Queue_Length(self.now_f64, len(self.queue_deque_task))
-            self.metrics_metrics_collector.Record_Server_Busy(self.now_f64, self.server_server.busy_bool)
+            self.metrics_metrics_collector.Record_Server_Busy(self.now_f64, self._Any_Agent_Busy())
             self.metrics_metrics_collector.Record_Queue_Nonempty(self.now_f64, len(self.queue_deque_task) > 0)
 
             if ev_event_opt.event_type == Event_Type.ARRIVAL:
@@ -141,21 +159,18 @@ class Simulator:
             else:
                 raise ValueError(f"Unknown event type: {ev_event_opt.event_type}")
 
-                                                            
-            self._Try_Start_Service()
+            self._Try_Start_Service_All_Idle()
 
-                                                             
         if hasattr(self.metrics_metrics_collector, "Set_End_Time"):
             self.metrics_metrics_collector.Set_End_Time(self.now_f64)
 
-                                                                   
         pending_list_task: List[Task] = list(self.queue_deque_task)
-
-        if (
-            self.server_server.current_task_task_opt is not None
-            and self.server_server.current_task_task_opt.completion_time_f64_opt is None
-        ):
-            pending_list_task.append(self.server_server.current_task_task_opt)
+        for agent in self.agents_list_agent:
+            if (
+                agent.current_task_task_opt is not None
+                and agent.current_task_task_opt.completion_time_f64_opt is None
+            ):
+                pending_list_task.append(agent.current_task_task_opt)
 
         self.metrics_metrics_collector.Finalize_Unfinished(pending_list_task)
         for tk in pending_list_task:
@@ -182,9 +197,6 @@ class Simulator:
     def _Handle_Arrival(self) -> None:
         self._arrivals_count_i32 += 1
         task_ = self._Make_Task(self.now_f64)
-        self._in_system_list_task.append(task_)
-
-                                                                                      
         self.queue_deque_task.append(task_)
 
         if hasattr(self.policy_scheduling_policy, "TFG_Policy_Identifier"):
@@ -192,75 +204,88 @@ class Simulator:
             preset_mode = self.policy_scheduling_policy.Decide_Mode(task_, state_at_arrival)
             task_.chosen_mode_mode_opt = preset_mode
 
-                               
         self._Schedule_Next_Arrival()
 
-    def _Try_Start_Service(self) -> None:
-        if self.server_server.busy_bool:
-            return
+    def _Try_Start_Service_All_Idle(self) -> None:
+        while True:
+            idle_agent_opt = next((a for a in self.agents_list_agent if not a.busy_bool), None)
+            if idle_agent_opt is None:
+                return
 
-                                                                             
-        if self.cfg_simulation_config.drop_expired_in_queue_bool and self.queue_deque_task:
-            self._Drop_All_Expired_In_Queue()
+            if self.cfg_simulation_config.drop_expired_in_queue_bool and self.queue_deque_task:
+                self._Drop_All_Expired_In_Queue()
 
-                                                                   
-        task_task_opt = self.policy_scheduling_policy.Select_Task(self.queue_deque_task, self.now_f64)
-        if task_task_opt is None:
-            return
+            task_task_opt = self.policy_scheduling_policy.Select_Task(self.queue_deque_task, self.now_f64)
+            if task_task_opt is None:
+                return
 
-                                                                         
-        if task_task_opt.Is_Expired(self.now_f64):
-            task_task_opt.Mark_Dropped(self.now_f64)
-            self.metrics_metrics_collector.Record_Task_Final(task_task_opt)
-            if hasattr(self.policy_scheduling_policy, "Observe_Task_Outcome"):
-                self.policy_scheduling_policy.Observe_Task_Outcome(task_task_opt)
-            return
+            if task_task_opt.Is_Expired(self.now_f64):
+                task_task_opt.Mark_Dropped(self.now_f64)
+                self.metrics_metrics_collector.Record_Task_Final(task_task_opt)
+                if hasattr(self.policy_scheduling_policy, "Observe_Task_Outcome"):
+                    self.policy_scheduling_policy.Observe_Task_Outcome(task_task_opt)
+                continue
 
-                                                 
-        mode_mode = task_task_opt.chosen_mode_mode_opt if task_task_opt.chosen_mode_mode_opt else self.policy_scheduling_policy.Decide_Mode(task_task_opt, self._State())
-                                                                                            
-        task_task_opt.Mark_Started(self.now_f64, mode_mode=mode_mode)
+            mode_mode = (
+                task_task_opt.chosen_mode_mode_opt
+                if task_task_opt.chosen_mode_mode_opt
+                else self.policy_scheduling_policy.Decide_Mode(task_task_opt, self._State())
+            )
+            task_task_opt.Mark_Started(self.now_f64, mode_mode=mode_mode)
+            task_task_opt.assigned_agent_id_i32_opt = int(idle_agent_opt.agent_id_i32)
 
-                                                         
-        sample_for_task = getattr(self.service_model_service_time, "Sample_For_Task", None)
-        if callable(sample_for_task):
-            service_time_f64 = float(sample_for_task(task_task_opt, mode_mode, self.rng_rng))
-        else:
-            service_time_f64 = float(self.service_model_service_time.Sample(mode_mode, self.rng_rng))
-        task_task_opt.service_time_f64_opt = service_time_f64
+            sample_for_task = getattr(self.service_model_service_time, "Sample_For_Task", None)
+            if callable(sample_for_task):
+                service_time_f64 = float(sample_for_task(task_task_opt, mode_mode, self.rng_rng))
+            else:
+                service_time_f64 = float(self.service_model_service_time.Sample(mode_mode, self.rng_rng))
+            task_task_opt.service_time_f64_opt = service_time_f64
 
-        self.server_server.busy_bool = True
-        self.server_server.current_task_task_opt = task_task_opt
-        self.server_server.current_service_end_f64_opt = self.now_f64 + service_time_f64
+            idle_agent_opt.busy_bool = True
+            idle_agent_opt.current_task_task_opt = task_task_opt
+            idle_agent_opt.current_service_end_f64_opt = self.now_f64 + service_time_f64
 
-        self.calendar_event_calendar.Schedule(
-            time_f64=self.server_server.current_service_end_f64_opt,
-            event_type_event_type=Event_Type.SERVICE_COMPLETE,
-            payload_any=task_task_opt,
-        )
+            payload_dict_obj = {
+                "agent_id_i32": int(idle_agent_opt.agent_id_i32),
+                "task_obj": task_task_opt,
+            }
+            self.calendar_event_calendar.Schedule(
+                time_f64=idle_agent_opt.current_service_end_f64_opt,
+                event_type_event_type=Event_Type.SERVICE_COMPLETE,
+                payload_any=payload_dict_obj,
+            )
 
-                                                        
-        if self.cfg_simulation_config.policy_config.enable_mode_switching_bool:
-            quantum_f64 = max(float(self.cfg_simulation_config.policy_config.switch_check_quantum_f64), 1e-6)
-            next_check_f64 = self.now_f64 + quantum_f64
+            if self.cfg_simulation_config.policy_config.enable_mode_switching_bool:
+                quantum_f64 = max(float(self.cfg_simulation_config.policy_config.switch_check_quantum_f64), 1e-6)
+                next_check_f64 = self.now_f64 + quantum_f64
 
-            if (
-                self.server_server.current_service_end_f64_opt is not None
-                and next_check_f64 < self.server_server.current_service_end_f64_opt
-            ):
-                self.calendar_event_calendar.Schedule(
-                    time_f64=next_check_f64,
-                    event_type_event_type=Event_Type.SWITCH_CHECK,
-                    payload_any=task_task_opt,
-                )
+                if (
+                    idle_agent_opt.current_service_end_f64_opt is not None
+                    and next_check_f64 < idle_agent_opt.current_service_end_f64_opt
+                ):
+                    self.calendar_event_calendar.Schedule(
+                        time_f64=next_check_f64,
+                        event_type_event_type=Event_Type.SWITCH_CHECK,
+                        payload_any=payload_dict_obj,
+                    )
 
     def _Handle_Service_Complete(self, ev_event: Event) -> None:
-        task_: Task = ev_event.payload
+        payload = ev_event.payload
+        if not isinstance(payload, dict):
+            return
 
-                                                                                            
+        task_ = payload.get("task_obj")
+        agent_id_i32 = payload.get("agent_id_i32")
+        if not isinstance(task_, Task) or not isinstance(agent_id_i32, int):
+            return
+
+        agent_opt = self._agents_by_id_dict.get(int(agent_id_i32))
+        if agent_opt is None:
+            return
+
         if (
-            self.server_server.current_task_task_opt is None
-            or task_.task_id != self.server_server.current_task_task_opt.task_id
+            agent_opt.current_task_task_opt is None
+            or task_.task_id != agent_opt.current_task_task_opt.task_id
         ):
             return
 
@@ -284,10 +309,9 @@ class Simulator:
                     fast_count_i32=int(snapshot_dict_obj.get("fast_count", 0)),
                 )
 
-                        
-        self.server_server.busy_bool = False
-        self.server_server.current_task_task_opt = None
-        self.server_server.current_service_end_f64_opt = None
+        agent_opt.busy_bool = False
+        agent_opt.current_task_task_opt = None
+        agent_opt.current_service_end_f64_opt = None
 
         self.metrics_metrics_collector.Record_Task_Final(task_)
         if hasattr(self.policy_scheduling_policy, "Observe_Task_Outcome"):
@@ -297,61 +321,72 @@ class Simulator:
         if not self.cfg_simulation_config.policy_config.enable_mode_switching_bool:
             return
 
-        task_: Task = ev_event.payload
+        payload = ev_event.payload
+        if not isinstance(payload, dict):
+            return
+
+        task_ = payload.get("task_obj")
+        agent_id_i32 = payload.get("agent_id_i32")
+        if not isinstance(task_, Task) or not isinstance(agent_id_i32, int):
+            return
+
+        agent_opt = self._agents_by_id_dict.get(int(agent_id_i32))
+        if agent_opt is None:
+            return
+
         if (
-            self.server_server.current_task_task_opt is None
-            or task_.task_id != self.server_server.current_task_task_opt.task_id
+            agent_opt.current_task_task_opt is None
+            or task_.task_id != agent_opt.current_task_task_opt.task_id
         ):
             return
 
-                                                 
         if task_.completion_time_f64_opt is not None:
             return
 
-                                                                 
         if task_.start_service_time_f64_opt is not None:
             task_.service_consumed_f64 = max(self.now_f64 - task_.start_service_time_f64_opt, 0.0)
 
-                                      
         if self.policy_scheduling_policy.Should_Switch_Mode(task_, self._State()):
-                                                                         
             task_.mode_switches_i32 += 1
             task_.chosen_mode_mode_opt = Mode.FAST
 
-                                                                 
             sample_for_task = getattr(self.service_model_service_time, "Sample_For_Task", None)
             if callable(sample_for_task):
                 remaining_service_f64 = float(sample_for_task(task_, Mode.FAST, self.rng_rng))
             else:
                 remaining_service_f64 = float(self.service_model_service_time.Sample(Mode.FAST, self.rng_rng))
 
-                                                                                    
             task_.service_time_f64_opt = float(task_.service_consumed_f64 + remaining_service_f64)
 
             new_end_f64 = self.now_f64 + remaining_service_f64
-            self.server_server.current_service_end_f64_opt = new_end_f64
+            agent_opt.current_service_end_f64_opt = new_end_f64
 
+            payload_dict_obj = {
+                "agent_id_i32": int(agent_opt.agent_id_i32),
+                "task_obj": task_,
+            }
             self.calendar_event_calendar.Schedule(
                 time_f64=new_end_f64,
                 event_type_event_type=Event_Type.SERVICE_COMPLETE,
-                payload_any=task_,
+                payload_any=payload_dict_obj,
             )
-
-                                                                            
             return
 
-                                                                              
         quantum_f64 = max(float(self.cfg_simulation_config.policy_config.switch_check_quantum_f64), 1e-6)
         next_check_f64 = self.now_f64 + quantum_f64
 
         if (
-            self.server_server.current_service_end_f64_opt is not None
-            and next_check_f64 < self.server_server.current_service_end_f64_opt
+            agent_opt.current_service_end_f64_opt is not None
+            and next_check_f64 < agent_opt.current_service_end_f64_opt
         ):
+            payload_dict_obj = {
+                "agent_id_i32": int(agent_opt.agent_id_i32),
+                "task_obj": task_,
+            }
             self.calendar_event_calendar.Schedule(
                 time_f64=next_check_f64,
                 event_type_event_type=Event_Type.SWITCH_CHECK,
-                payload_any=task_,
+                payload_any=payload_dict_obj,
             )
 
     def _Drop_All_Expired_In_Queue(self) -> None:

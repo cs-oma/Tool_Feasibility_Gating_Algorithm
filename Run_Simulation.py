@@ -9,8 +9,10 @@
 #  Environment: Python 3.9.13
 # =============================================================================
 
+import argparse
 import csv
 import os
+from dataclasses import replace
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,6 +29,7 @@ from Configurations import Simulation_Config
 from Core.Simulator import Simulator
 from Metrics.Collector import MetricsCollector
 from Metrics.Reports import Format_Summary
+from Metrics.SQLite_Logger import SQLite_Logger
 from Models.Distributions import (
     Exponential_Interarrival,
     Lognormal_Service_Times,
@@ -206,8 +209,17 @@ def _Plot_Priority_Miss_Rate_Comparison(
     plt.savefig(out_path)
     plt.close(fig)
 
-def Run_Baseline() -> None:
-    simulation_config = Simulation_Config()
+def _Build_Simulation_Config(num_agents_i32: int) -> Simulation_Config:
+    cfg = Simulation_Config(num_agents_i32=int(num_agents_i32))
+    n_agents_i32 = int(num_agents_i32)
+    if n_agents_i32 <= 1:
+        return cfg
+
+    return cfg
+
+
+def Run_Baseline(num_agents_i32: int) -> None:
+    simulation_config = _Build_Simulation_Config(num_agents_i32)
     policy_names = [
         "Fcfs_Always_Fast",
         "Fcfs_Always_Slow",
@@ -221,6 +233,10 @@ def Run_Baseline() -> None:
     Path("Results").mkdir(parents=True, exist_ok=True)
     base = Path("Results")
     results_path = base / "results.csv"
+    sqlite_logger = SQLite_Logger(
+        tasklog_db_path=base / "tasklog.sqlite",
+        summary_db_path=base / "simulation_summary.sqlite",
+    )
 
     header = ("Policy_ID,Total_Tasks,CompletedTaskCount,AbandonTaskCount,"
               "UnfinishedTaskCount,MissRate,AvgUtility,AvgResponseTime,"
@@ -234,9 +250,10 @@ def Run_Baseline() -> None:
     priority_policy_summaries: dict = {}
 
     for policy_name in policy_names:
-        simulation_config = Simulation_Config()
+        simulation_config = _Build_Simulation_Config(num_agents_i32)
+        effective_lambda_f64 = float(simulation_config.Effective_Arrival_Rate())
 
-        interarrival_exponential = Exponential_Interarrival(simulation_config.arrival_config.lambda_rate_f64)
+        interarrival_exponential = Exponential_Interarrival(effective_lambda_f64)
         service_cfg = simulation_config.service_config
         service_source = str(service_cfg.service_time_source).lower()
         if service_source == "trace":
@@ -314,6 +331,30 @@ def Run_Baseline() -> None:
             metrics_collector,
         )
         agg_dict_obj = sim_simulator.Run()
+
+        tasks_all_list_task = (
+            list(metrics_collector.completed_tasks_list_task)
+            + list(metrics_collector.dropped_tasks_list_task)
+            + list(metrics_collector.unfinished_tasks_list_task)
+        )
+        run_id_i32 = sqlite_logger.Insert_Run_Summary(
+            policy_name=policy_name,
+            cfg_simulation_config=simulation_config,
+            aggregate_dict_obj=agg_dict_obj,
+        )
+        sqlite_logger.Insert_Task_Logs(
+            run_id_i32=run_id_i32,
+            policy_name=policy_name,
+            cfg_simulation_config=simulation_config,
+            utility_model=utility_model_firm_deadline_quality_utility,
+            tasks_iterable_task=tasks_all_list_task,
+        )
+        print(
+            "RunID="
+            f"{run_id_i32}, agents={simulation_config.num_agents_i32}, "
+            f"lambda_base={simulation_config.arrival_config.lambda_rate_f64}, "
+            f"lambda_effective={effective_lambda_f64}"
+        )
 
         epsilon_timeline_opt = None
         if hasattr(policy_scheduling_policy, "epsilon_trace_times_list_f64") and hasattr(
@@ -435,4 +476,12 @@ def Run_Baseline() -> None:
         _Write_Priority_Policy_Table(priority_policy_summaries, tfg_tables_dir)
 
 if __name__ == "__main__":
-    Run_Baseline()
+    parser = argparse.ArgumentParser(description="Run TFG simulation.")
+    parser.add_argument(
+        "--cores",
+        type=int,
+        default=(os.cpu_count() or 1),
+        help="Number of processors/agents to simulate.",
+    )
+    args = parser.parse_args()
+    Run_Baseline(num_agents_i32=max(int(args.cores), 1))
